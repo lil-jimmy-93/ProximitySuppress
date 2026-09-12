@@ -745,7 +745,9 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
       if (is_retry) {
         *reply = 0;
       } else {
+        _cli_sender = client;  // so async commands (e.g. trace) can reply later
         handleCommand(sender_timestamp, command, reply);
+        _cli_sender = NULL;
       }
       int text_len = strlen(reply);
       if (text_len > 0) {
@@ -894,6 +896,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   pending_trace_tag = 0;
   pending_trace_sent_at = 0;
   pending_trace_expires = 0;
+  pending_trace_client = NULL;
+  _cli_sender = NULL;
 
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
@@ -1282,10 +1286,42 @@ void MyMesh::handleProxCommand(char *command, char *reply) {
   strcpy(reply, "Err - unknown prox command");
 }
 
-#define TRACE_CLI_TIMEOUT_MS  3000
+#define TRACE_CLI_TIMEOUT_MS  5000
+
+void MyMesh::deliverTraceResult(const char *msg) {
+  pending_trace_active = false;
+  pending_trace_tag = 0;
+
+  ClientInfo *client = pending_trace_client;
+  pending_trace_client = NULL;
+
+  if (client) {
+    // Deferred remote-CLI reply (single RF response — no interim "OK - sent")
+    uint8_t temp[166];
+    uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+    memcpy(temp, &timestamp, 4);
+    temp[4] = (TXT_TYPE_CLI_DATA << 2);
+    int text_len = strlen(msg);
+    if (text_len > (int)sizeof(temp) - 6) text_len = sizeof(temp) - 6;
+    memcpy(&temp[5], msg, text_len);
+    temp[5 + text_len] = 0;
+
+    auto reply = createDatagram(PAYLOAD_TYPE_TXT_MSG, client->id, client->shared_secret, temp, 5 + text_len);
+    if (reply) {
+      if (client->out_path_len == OUT_PATH_UNKNOWN) {
+        sendFloodReply(reply, CLI_REPLY_DELAY_MILLIS, _prefs.path_hash_mode + 1);
+      } else {
+        sendDirect(reply, client->out_path, client->out_path_len, CLI_REPLY_DELAY_MILLIS);
+      }
+    }
+  } else {
+    // USB serial CLI
+    Serial.println(msg);
+  }
+}
 
 void MyMesh::handleTraceCommand(char *command, char *reply) {
-  reply[0] = 0;
+  reply[0] = 0;  // never send an interim reply — only success/failure later
 
   // Expected: "trace <hex-hash>"  (2/4/8 hex chars → 1/2/4-byte hash)
   const char* args = command + 5;
@@ -1341,13 +1377,15 @@ void MyMesh::handleTraceCommand(char *command, char *reply) {
 
   // Zero-hop TRACE: path is just the target hash. Target appends SNR and
   // retransmits; we hear that and onTraceRecv fires (offset past end).
+  // NOTE: the target must allow packet forwarding (repeater with fwd on).
   sendDirect(pkt, target, hash_len);
 
   pending_trace_active = true;
   pending_trace_tag = tag;
   pending_trace_sent_at = millis();
   pending_trace_expires = futureMillis(TRACE_CLI_TIMEOUT_MS);
-  strcpy(reply, "OK - sent");
+  pending_trace_client = _cli_sender;  // NULL for USB serial
+  // leave reply empty — result comes later via deliverTraceResult()
 }
 
 void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
@@ -1356,11 +1394,10 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
 
   unsigned long rtt = millis() - pending_trace_sent_at;
   float snr = packet->getSNR();
-  pending_trace_active = false;
-  pending_trace_tag = 0;
 
-  // Async result on serial (immediate CLI reply was "OK - sent")
-  Serial.printf("OK - snr %.2f, %lums\n", snr, rtt);
+  char msg[64];
+  snprintf(msg, sizeof(msg), "OK - snr %.2f, %lums", snr, rtt);
+  deliverTraceResult(msg);
 }
 
 void MyMesh::clearStats() {
@@ -1504,9 +1541,7 @@ void MyMesh::loop() {
   }
 
   if (pending_trace_active && millisHasNowPassed(pending_trace_expires)) {
-    pending_trace_active = false;
-    pending_trace_tag = 0;
-    Serial.println("Failed - no response heard");
+    deliverTraceResult("Failed - no response heard");
   }
 
   // update uptime

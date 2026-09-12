@@ -106,11 +106,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   unsigned long pending_discover_until;
   bool region_load_active;
 
-  // Serial CLI zero-hop TRACE (async)
+  // CLI zero-hop TRACE (async — result delivered later on serial or remote CLI)
   bool pending_trace_active;
   uint32_t pending_trace_tag;
   unsigned long pending_trace_sent_at;
   unsigned long pending_trace_expires;
+  ClientInfo* pending_trace_client;   // non-NULL when started from remote CLI
+  ClientInfo* _cli_sender;            // set around remote handleCommand()
   unsigned long dirty_contacts_expiry;
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
@@ -240,6 +242,7 @@ public:
   void applyProxFromPrefs();
   void handleProxCommand(char* command, char* reply);
   void handleTraceCommand(char* command, char* reply);
+  void deliverTraceResult(const char* msg);
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();

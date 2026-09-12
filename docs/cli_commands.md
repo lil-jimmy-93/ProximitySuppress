@@ -139,15 +139,19 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Behavior:**
 - Sends a MeshCore TRACE to that hash only (direct neighbor; no multi-hop path discovery).
-- Immediate reply: `OK - sent`
-- Later on serial: `OK - snr <db>, <rtt>ms` or `Failed - no response heard`
+- No interim reply. After the round-trip (or timeout) you get exactly one result:
+  - `OK - snr <db>, <rtt>ms`
+  - `Failed - no response heard`
+- Works from USB serial or remote CLI (result is sent as the CLI reply).
 
 **Examples:**
 - `trace 91`
 - `trace 9126`
 - `trace 0x9126`
 
-**Note:** Only one trace may be pending at a time. Timeout is about 3 seconds.
+**Notes:**
+- Target must be a **repeater with forwarding enabled** (TRACE needs the peer to retransmit).
+- Only one trace may be pending at a time. Timeout is about 5 seconds.
 
 ---
 
