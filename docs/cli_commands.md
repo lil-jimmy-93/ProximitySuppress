@@ -129,6 +129,28 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+### Trace a direct neighbor (zero-hop)
+
+**Usage:**
+- `trace <hash>`
+
+**Parameters:**
+- `hash`: Neighbor pubkey prefix as hex — **2**, **4**, or **8** characters (1, 2, or 4 bytes). Optional `0x` prefix.
+
+**Behavior:**
+- Sends a MeshCore TRACE to that hash only (direct neighbor; no multi-hop path discovery).
+- Immediate reply: `OK - sent`
+- Later on serial: `OK - snr <db>, <rtt>ms` or `Failed - no response heard`
+
+**Examples:**
+- `trace 91`
+- `trace 9126`
+- `trace 0x9126`
+
+**Note:** Only one trace may be pending at a time. Timeout is about 3 seconds.
+
+---
+
 ## Statistics
 
 ### Clear Stats

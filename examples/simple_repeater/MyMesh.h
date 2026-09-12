@@ -105,6 +105,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
   bool region_load_active;
+
+  // Serial CLI zero-hop TRACE (async)
+  bool pending_trace_active;
+  uint32_t pending_trace_tag;
+  unsigned long pending_trace_sent_at;
+  unsigned long pending_trace_expires;
   unsigned long dirty_contacts_expiry;
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
@@ -178,6 +184,8 @@ protected:
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override;
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onControlDataRecv(mesh::Packet* packet) override;
+  void onTraceRecv(mesh::Packet* packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
+                   const uint8_t* path_snrs, const uint8_t* path_hashes, uint8_t path_len) override;
 
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 
@@ -231,6 +239,7 @@ public:
 
   void applyProxFromPrefs();
   void handleProxCommand(char* command, char* reply);
+  void handleTraceCommand(char* command, char* reply);
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();

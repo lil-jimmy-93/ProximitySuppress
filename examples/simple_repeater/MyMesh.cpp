@@ -890,6 +890,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _logging = false;
   region_load_active = false;
   recv_pkt_region = NULL;
+  pending_trace_active = false;
+  pending_trace_tag = 0;
+  pending_trace_sent_at = 0;
+  pending_trace_expires = 0;
 
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
@@ -1278,6 +1282,87 @@ void MyMesh::handleProxCommand(char *command, char *reply) {
   strcpy(reply, "Err - unknown prox command");
 }
 
+#define TRACE_CLI_TIMEOUT_MS  3000
+
+void MyMesh::handleTraceCommand(char *command, char *reply) {
+  reply[0] = 0;
+
+  // Expected: "trace <hex-hash>"  (2/4/8 hex chars → 1/2/4-byte hash)
+  const char* args = command + 5;
+  while (*args == ' ') args++;
+  if (*args == 0) {
+    strcpy(reply, "Err - usage: trace <hash>");
+    return;
+  }
+  if (pending_trace_active) {
+    strcpy(reply, "Err - trace already pending");
+    return;
+  }
+
+  // Optional 0x prefix
+  if (args[0] == '0' && (args[1] == 'x' || args[1] == 'X')) args += 2;
+
+  size_t hex_len = strlen(args);
+  if (hex_len != 2 && hex_len != 4 && hex_len != 8) {
+    strcpy(reply, "Err - hash must be 2, 4 or 8 hex chars");
+    return;
+  }
+  for (size_t i = 0; i < hex_len; i++) {
+    if (!mesh::Utils::isHexChar(args[i])) {
+      strcpy(reply, "Err - bad hash hex");
+      return;
+    }
+  }
+
+  uint8_t hash_len = (uint8_t)(hex_len / 2);          // 1, 2 or 4
+  uint8_t path_sz = 0;                                // flags low bits: size = 1 << path_sz
+  if (hash_len == 2) path_sz = 1;
+  else if (hash_len == 4) path_sz = 2;
+
+  uint8_t target[4];
+  if (!mesh::Utils::fromHex(target, hash_len, args)) {
+    strcpy(reply, "Err - bad hash hex");
+    return;
+  }
+  if (self_id.isHashMatch(target, hash_len)) {
+    strcpy(reply, "Err - cannot trace self");
+    return;
+  }
+
+  uint32_t tag = 0;
+  getRNG()->random((uint8_t *)&tag, sizeof(tag));
+  if (tag == 0) tag = 1;
+
+  mesh::Packet* pkt = createTrace(tag, 0, path_sz);
+  if (!pkt) {
+    strcpy(reply, "Err - no packet");
+    return;
+  }
+
+  // Zero-hop TRACE: path is just the target hash. Target appends SNR and
+  // retransmits; we hear that and onTraceRecv fires (offset past end).
+  sendDirect(pkt, target, hash_len);
+
+  pending_trace_active = true;
+  pending_trace_tag = tag;
+  pending_trace_sent_at = millis();
+  pending_trace_expires = futureMillis(TRACE_CLI_TIMEOUT_MS);
+  strcpy(reply, "OK - sent");
+}
+
+void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
+                         const uint8_t *path_snrs, const uint8_t *path_hashes, uint8_t path_len) {
+  if (!pending_trace_active || tag != pending_trace_tag) return;
+
+  unsigned long rtt = millis() - pending_trace_sent_at;
+  float snr = packet->getSNR();
+  pending_trace_active = false;
+  pending_trace_tag = 0;
+
+  // Async result on serial (immediate CLI reply was "OK - sent")
+  Serial.printf("OK - snr %.2f, %lums\n", snr, rtt);
+}
+
 void MyMesh::clearStats() {
   radio_driver.resetStats();
   resetStats();
@@ -1372,6 +1457,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     }
   } else if (memcmp(command, "get prox", 8) == 0 || memcmp(command, "set prox", 8) == 0) {
     handleProxCommand(command, reply);
+  } else if (memcmp(command, "trace ", 6) == 0 || strcmp(command, "trace") == 0) {
+    handleTraceCommand(command, reply);
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1416,6 +1503,12 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
+  if (pending_trace_active && millisHasNowPassed(pending_trace_expires)) {
+    pending_trace_active = false;
+    pending_trace_tag = 0;
+    Serial.println("Failed - no response heard");
+  }
+
   // update uptime
   uint32_t now = millis();
   uptime_millis += now - last_millis;
@@ -1427,5 +1520,6 @@ bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
+  if (pending_trace_active) return true;
   return _mgr->getOutboundTotal() > 0;
 }
