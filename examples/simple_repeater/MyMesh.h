@@ -106,7 +106,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   unsigned long pending_discover_until;
   bool region_load_active;
 
-  // CLI zero-hop TRACE (async — result delivered later on serial or remote CLI)
+  // CLI TRACE (async — 1..N hops; result later on serial or remote CLI)
   bool pending_trace_active;
   uint32_t pending_trace_tag;
   unsigned long pending_trace_sent_at;

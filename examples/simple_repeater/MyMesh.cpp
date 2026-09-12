@@ -1286,7 +1286,9 @@ void MyMesh::handleProxCommand(char *command, char *reply) {
   strcpy(reply, "Err - unknown prox command");
 }
 
-#define TRACE_CLI_TIMEOUT_MS  5000
+#define TRACE_CLI_TIMEOUT_BASE_MS   3000
+#define TRACE_CLI_TIMEOUT_PER_HOP_MS 1500
+#define TRACE_CLI_MAX_HOPS          8
 
 void MyMesh::deliverTraceResult(const char *msg) {
   pending_trace_active = false;
@@ -1323,11 +1325,15 @@ void MyMesh::deliverTraceResult(const char *msg) {
 void MyMesh::handleTraceCommand(char *command, char *reply) {
   reply[0] = 0;  // never send an interim reply — only success/failure later
 
-  // Expected: "trace <hex-hash>"  (2/4/8 hex chars → 1/2/4-byte hash)
+  // Expected:
+  //   trace <hash>                         (direct neighbor)
+  //   trace <h1>,<h2>,...,<hN>             (multi-hop round-trip path)
+  // Each hash is 2/4/8 hex chars (1/2/4 bytes); all hops must match.
+  // Include the return path yourself, e.g. 26,29,26 or 91,26,29,91
   const char* args = command + 5;
   while (*args == ' ') args++;
   if (*args == 0) {
-    strcpy(reply, "Err - usage: trace <hash>");
+    strcpy(reply, "Err - usage: trace <hash>[,hash...]");
     return;
   }
   if (pending_trace_active) {
@@ -1335,32 +1341,77 @@ void MyMesh::handleTraceCommand(char *command, char *reply) {
     return;
   }
 
-  // Optional 0x prefix
-  if (args[0] == '0' && (args[1] == 'x' || args[1] == 'X')) args += 2;
+  // Copy args so we can strtok-style mutate
+  char buf[128];
+  StrHelper::strncpy(buf, args, sizeof(buf));
 
-  size_t hex_len = strlen(args);
-  if (hex_len != 2 && hex_len != 4 && hex_len != 8) {
-    strcpy(reply, "Err - hash must be 2, 4 or 8 hex chars");
-    return;
-  }
-  for (size_t i = 0; i < hex_len; i++) {
-    if (!mesh::Utils::isHexChar(args[i])) {
+  uint8_t path[TRACE_CLI_MAX_HOPS * 4];
+  uint8_t path_bytes = 0;
+  uint8_t hop_count = 0;
+  uint8_t hash_len = 0;   // bytes per hop (set from first hop)
+  uint8_t path_sz = 0;    // flags low bits: size = 1 << path_sz
+
+  char *cursor = buf;
+  while (*cursor && hop_count < TRACE_CLI_MAX_HOPS) {
+    while (*cursor == ' ' || *cursor == ',') cursor++;
+    if (*cursor == 0) break;
+
+    char *tok = cursor;
+    while (*cursor && *cursor != ',' && *cursor != ' ') cursor++;
+    char saved = *cursor;
+    *cursor = 0;
+
+    const char *hex = tok;
+    if (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) hex += 2;
+
+    size_t hex_len = strlen(hex);
+    if (hex_len != 2 && hex_len != 4 && hex_len != 8) {
+      strcpy(reply, "Err - hash must be 2, 4 or 8 hex chars");
+      return;
+    }
+    for (size_t i = 0; i < hex_len; i++) {
+      if (!mesh::Utils::isHexChar(hex[i])) {
+        strcpy(reply, "Err - bad hash hex");
+        return;
+      }
+    }
+
+    uint8_t this_len = (uint8_t)(hex_len / 2);
+    if (hop_count == 0) {
+      hash_len = this_len;
+      if (hash_len == 2) path_sz = 1;
+      else if (hash_len == 4) path_sz = 2;
+      else path_sz = 0;
+    } else if (this_len != hash_len) {
+      strcpy(reply, "Err - mixed hash sizes");
+      return;
+    }
+
+    if (!mesh::Utils::fromHex(&path[path_bytes], hash_len, hex)) {
       strcpy(reply, "Err - bad hash hex");
       return;
     }
+    path_bytes += hash_len;
+    hop_count++;
+
+    *cursor = saved;
+    if (saved == 0) break;
+    cursor++;
   }
 
-  uint8_t hash_len = (uint8_t)(hex_len / 2);          // 1, 2 or 4
-  uint8_t path_sz = 0;                                // flags low bits: size = 1 << path_sz
-  if (hash_len == 2) path_sz = 1;
-  else if (hash_len == 4) path_sz = 2;
-
-  uint8_t target[4];
-  if (!mesh::Utils::fromHex(target, hash_len, args)) {
-    strcpy(reply, "Err - bad hash hex");
+  if (hop_count == 0) {
+    strcpy(reply, "Err - usage: trace <hash>[,hash...]");
     return;
   }
-  if (self_id.isHashMatch(target, hash_len)) {
+  // leftover non-empty token means too many hops
+  while (*cursor == ' ' || *cursor == ',') cursor++;
+  if (*cursor) {
+    strcpy(reply, "Err - max 8 hops");
+    return;
+  }
+
+  // Direct single-hop to self is nonsense; multi-hop may end at self (return).
+  if (hop_count == 1 && self_id.isHashMatch(path, hash_len)) {
     strcpy(reply, "Err - cannot trace self");
     return;
   }
@@ -1375,15 +1426,15 @@ void MyMesh::handleTraceCommand(char *command, char *reply) {
     return;
   }
 
-  // Zero-hop TRACE: path is just the target hash. Target appends SNR and
-  // retransmits; we hear that and onTraceRecv fires (offset past end).
-  // NOTE: the target must allow packet forwarding (repeater with fwd on).
-  sendDirect(pkt, target, hash_len);
+  // TRACE path is the given hop list. Each hop appends SNR and retransmits.
+  // Completion: we hear the last hop's retransmit, OR we are the last hop.
+  sendDirect(pkt, path, path_bytes);
 
   pending_trace_active = true;
   pending_trace_tag = tag;
   pending_trace_sent_at = millis();
-  pending_trace_expires = futureMillis(TRACE_CLI_TIMEOUT_MS);
+  pending_trace_expires = futureMillis(TRACE_CLI_TIMEOUT_BASE_MS +
+                                       (unsigned long)hop_count * TRACE_CLI_TIMEOUT_PER_HOP_MS);
   pending_trace_client = _cli_sender;  // NULL for USB serial
   // leave reply empty — result comes later via deliverTraceResult()
 }
@@ -1393,10 +1444,30 @@ void MyMesh::onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code,
   if (!pending_trace_active || tag != pending_trace_tag) return;
 
   unsigned long rtt = millis() - pending_trace_sent_at;
-  float snr = packet->getSNR();
+  uint8_t path_sz = flags & 0x03;
+  uint8_t hash_len = (uint8_t)(1 << path_sz);
+  uint8_t hops = (hash_len > 0) ? (uint8_t)(path_len >> path_sz) : 0;
+  float end_snr = packet->getSNR();
 
-  char msg[64];
-  snprintf(msg, sizeof(msg), "OK - snr %.2f, %lums", snr, rtt);
+  char msg[160];
+  if (hops <= 1) {
+    // Keep the simple zero-hop format
+    snprintf(msg, sizeof(msg), "OK - snr %.2f, %lums", end_snr, rtt);
+  } else {
+    int n = snprintf(msg, sizeof(msg), "OK");
+    for (uint8_t h = 0; h < hops && n > 0 && (size_t)n < sizeof(msg); h++) {
+      char hex[9];
+      mesh::Utils::toHex(hex, &path_hashes[h * hash_len], hash_len);
+      float snr = ((float)(int8_t)path_snrs[h]) / 4.0f;
+      int m = snprintf(msg + n, sizeof(msg) - n, " %s:%.2f", hex, snr);
+      if (m < 0) break;
+      n += m;
+    }
+    if (n > 0 && (size_t)n < sizeof(msg)) {
+      snprintf(msg + n, sizeof(msg) - n, " end:%.2f %lums", end_snr, rtt);
+    }
+  }
+
   deliverTraceResult(msg);
 }
 

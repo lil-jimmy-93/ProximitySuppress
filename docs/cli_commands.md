@@ -129,29 +129,34 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
-### Trace a direct neighbor (zero-hop)
+### Trace path (zero or multi-hop)
 
 **Usage:**
 - `trace <hash>`
+- `trace <hash1>,<hash2>,...,<hashN>`
 
 **Parameters:**
-- `hash`: Neighbor pubkey prefix as hex — **2**, **4**, or **8** characters (1, 2, or 4 bytes). Optional `0x` prefix.
+- Each `hash`: pubkey prefix as hex — **2**, **4**, or **8** characters (1, 2, or 4 bytes). Optional `0x` prefix.
+- All hops in one command must use the same hash size.
+- Max **8** hops. Build the **round-trip** yourself (out and back), e.g. `26,29,26` or `91,26,29,91`.
 
 **Behavior:**
-- Sends a MeshCore TRACE to that hash only (direct neighbor; no multi-hop path discovery).
-- No interim reply. After the round-trip (or timeout) you get exactly one result:
-  - `OK - snr <db>, <rtt>ms`
+- Sends a MeshCore TRACE along the given path.
+- No interim reply. One final result:
+  - `OK 26:10.25 29:7.50 26:8.00 end:9.50 812ms` (multi-hop)
+  - `OK - snr 10.25, 256ms` (single hop)
   - `Failed - no response heard`
-- Works from USB serial or remote CLI (result is sent as the CLI reply).
+- Works from USB serial or remote CLI.
 
 **Examples:**
-- `trace 91`
-- `trace 9126`
-- `trace 0x9126`
+- `trace 91` — direct neighbor
+- `trace 91,26,29,91` — multi-hop round trip (1-byte hashes)
+- `trace 9126,26ab,29cd,9126` — same with 2-byte hashes
 
 **Notes:**
-- Target must be a **repeater with forwarding enabled** (TRACE needs the peer to retransmit).
-- Only one trace may be pending at a time. Timeout is about 5 seconds.
+- Intermediate hops must be **repeaters with forwarding enabled**.
+- The last hop should be a node you can hear (often your neighbor, or yourself as the final return hop).
+- Only one trace may be pending at a time. Timeout scales with hop count (~3s + 1.5s per hop).
 
 ---
 

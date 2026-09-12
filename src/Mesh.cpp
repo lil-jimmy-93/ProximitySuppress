@@ -60,6 +60,12 @@ DispatcherAction Mesh::onRecvPacket(Packet* pkt) {
         // append SNR (Not hash!)
         pkt->path[pkt->path_len++] = (int8_t) (pkt->getSNR()*4);
 
+        // If we were the final hop, notify now so an initiator that listed
+        // itself last still gets onTraceRecv (then retransmit for listeners).
+        if (((uint16_t)pkt->path_len << path_sz) >= len) {
+          onTraceRecv(pkt, trace_tag, auth_code, flags, pkt->path, &pkt->payload[i], len);
+        }
+
         uint32_t d = getDirectRetransmitDelay(pkt);
         return ACTION_RETRANSMIT_DELAYED(5, d);  // schedule with priority 5 (for now), maybe make configurable?
       }
